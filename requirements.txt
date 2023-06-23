@@ -1,0 +1,9 @@
+numpy
+matplotlib
+uci_datasets
+conditional_variance
+tensorflow
+scipy
+tqdm
+gpflow
+gpflux

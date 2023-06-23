@@ -72,87 +72,16 @@ class ConditionalVariance():
                             not (k == "threshold" and self.threshold == 0.0)])
         return f"{type(self).__name__}({params})"
 
-    def remove_points_increment(self, training_inputs: np.ndarray, kernel: gpflow.kernels.Kernel, num_to_remove: int, Z):
-        N = training_inputs.shape[0]
-        intersection = np.asarray([i for y in Z for i,x in enumerate(training_inputs) if(np.array_equal(x, y))]).T
-        while num_to_remove > 0:
-            M = len(Z)
-            indices = np.zeros(M, dtype=int) + N
-            
-            #TODO FIX cj/ci issues with correct indexing. Need to get real index as well as intersection index
-            di = kernel(training_inputs, None, full_cov=False).numpy() + 1e-12  # jitter
-            if self.sample:
-                indices[0] = sample_discrete(di[intersection])
-            else:
-                indices[0] = np.argmax(di[intersection])
-            ci = np.zeros((M - 1, N))  # [M,N]
-            for m in range(M - 1):
-                j = int(intersection[indices[m]])  # int
-                new_Z = training_inputs[j:j + 1]  # [1,D]
-                dj = np.sqrt(di[j])  # float
-                cj = ci[:m, j]  # [m, 1]
-                Lraw = np.array(kernel(training_inputs, new_Z, full_cov=True))
-                L = np.round(np.squeeze(Lraw), 20)  # [N]
-                L[j] += 1e-12  # jitter
-                ei = (L - np.dot(cj, ci[:m])) / dj
-                ci[m, :] = ei
-                try:
-                    di -= ei ** 2
-                except FloatingPointError:
-                    pass
-                di = np.clip(di, 0, None)
-                if self.sample:
-                    indices[m + 1] = sample_discrete(di[intersection])
-                else:
-                    indices[m + 1] = np.argmax(di[intersection])# select first point, add to index 0
-                # sum of di is tr(Kff-Qff), if this is small things are ok
-            Z = np.delete(Z, indices[-1], 0)
-            intersection = np.delete(intersection, indices[-1], 0)
-            num_to_remove -= 1
-        indices = indices.astype(int)
-
-        return Z.copy(), indices
-
-    def remove_points_batch(self, training_inputs: np.ndarray, kernel: gpflow.kernels.Kernel, num_to_remove: int, Z):
-        N = training_inputs.shape[0]
-        M = len(Z)-num_to_remove
-        perm = np.random.permutation(N)  # permute entries so tiebreaking is random
-        training_inputs = training_inputs[perm]
-        # note this will throw an out of bounds exception if we do not update each entry
-        indices = np.zeros(M, dtype=int) + N
-        intersection = np.asarray([i for y in Z for i,x in enumerate(training_inputs) if(np.array_equal(x, y))]).T
-        #TODO FIX cj/ci issues with correct indexing. Need to get real index as well as intersection index
-        di = kernel(training_inputs, None, full_cov=False).numpy() + 1e-12  # jitter
-        if self.sample:
-            indices[0] = sample_discrete(di[intersection])
-        else:
-            indices[0] = np.argmax(di[intersection])
-        ci = np.zeros((M - 1, N))  # [M,N]
-        for m in range(M - 1):
-            j = int(intersection[indices[m]])  # int
-            new_Z = training_inputs[j:j + 1]  # [1,D]
-            dj = np.sqrt(di[j])  # float
-            cj = ci[:m, j]  # [m, 1]
-            Lraw = np.array(kernel(training_inputs, new_Z, full_cov=True))
-            L = np.round(np.squeeze(Lraw), 20)  # [N]
-            L[j] += 1e-12  # jitter
-            ei = (L - np.dot(cj, ci[:m])) / dj
-            ci[m, :] = ei
-            try:
-                di -= ei ** 2
-            except FloatingPointError:
-                pass
-            di = np.clip(di, 0, None)
-            if self.sample:
-                indices[m + 1] = sample_discrete(di[intersection])
-            else:
-                indices[m + 1] = np.argmax(di[intersection])  # select first point, add to index 0
-            # sum of di is tr(Kff-Qff), if this is small things are ok 
-        indices = indices.astype(int)
-        Z = Z[indices].copy()
-        return Z, intersection[indices]
 
     def remove_points_sgpr(self, training_inputs, gp, threshold, return_di=False):
+        """Prune Inducing Points from SGPR
+
+        Args:
+            training_inputs (Tuple): inputs (x_train, y_train) 
+            gp: SGPR from which to remove inducing points
+            threshold: Threshold for change in ELBO (np.abs(elbo_base - elbo_curr)/np.abs(elbo_base) <= 1 - threshold)
+            return_di (bool, optional): If true, return the values of di for each point removed. Defaults to False.
+        """
         kernel = gp.kernel
         x_train = training_inputs[0]
         Z = gp.inducing_variable.Z.numpy()
@@ -204,7 +133,6 @@ class ConditionalVariance():
                 else:
                     indices[m + 1] = np.argmax(di[intersection][remaining_points])
                     remaining_points = np.delete(remaining_points,(indices[m+1]), 0)
-            print(i, elbo_base, elbo_curr)
             sys.stdout.flush()
             i+=1
             idx_to_remove = next(iter(remaining_points))
@@ -227,6 +155,14 @@ class ConditionalVariance():
         return Z.copy(), indices, gp, elbos
 
     def remove_points_svgp(self, training_inputs, gp, threshold, return_di=False):
+        """Prune Inducing Points from SVGP
+
+        Args:
+            training_inputs (Tuple): inputs (x_train, y_train) 
+            gp: SVGP from which to remove inducing points
+            threshold: Threshold for change in ELBO (np.abs(elbo_base - elbo_curr)/np.abs(elbo_base) <= 1 - threshold)
+            return_di (bool, optional): If true, return the values of di for each point removed. Defaults to False.
+        """
         kernel = gp.kernel
         x_train = training_inputs[0]
         Z = gp.inducing_variable.Z.numpy()
@@ -267,8 +203,6 @@ class ConditionalVariance():
                 Lraw = np.array(kernel(x_train, new_Z, full_cov=True))
                 L = np.round(np.squeeze(Lraw), 20)  # [N]
                 L[j] += 1e-12  # jitter
-                print(dj)
-                # dj += 1e-12
                 
                 ei = (L - np.dot(cj, ci[:m])) / dj
                 ci[m, :] = ei
@@ -302,7 +236,6 @@ class ConditionalVariance():
             gp.q_sqrt = old_q_sqrt
             gp.inducing_variable = gpflow.inducing_variables.InducingPoints(Z)
             
-            print(elbo_base, elbo_curr)
             sys.stdout.flush()
         if np.abs(elbo_base - elbo_curr)/np.abs(elbo_base) <= 1 - threshold and len(test_Z) >= 1:
             Z = test_Z.copy()
@@ -314,7 +247,15 @@ class ConditionalVariance():
         return Z.copy(), indices, gp, elbos
 
     def remove_points_deep_gp(self, training_inputs, layer_idx, deep_gp, threshold:float, return_di=False):
-        i= 0
+        """Prune Inducing Points from DGP
+
+        Args:
+            training_inputs (Tuple): inputs (x_train, y_train)
+            layer_idx: Index of layer from which to remove inducing points
+            deep_gp: DGP from which to remove inducing points
+            threshold: Threshold for change in ELBO (np.abs(elbo_base - elbo_curr)/np.abs(elbo_base) <= 1 - threshold)
+            return_di (bool, optional): If true, return the values of di for each point removed. Defaults to False.
+        """
         assert (threshold <= 1 and threshold >= 0)
         
         kernel = deep_gp.f_layers[layer_idx].kernel
@@ -332,7 +273,6 @@ class ConditionalVariance():
         elbos = []
         dis = []
         while (np.abs(elbo_base - elbo_curr)/np.abs(elbo_base) <= 1 - threshold or elbo_curr >= elbo_base)  and len(test_Z) > 1:
-            print(i)
             sys.stdout.flush()
             deep_gp.f_layers[layer_idx].q_sqrt = new_q_sqrt
             deep_gp.f_layers[layer_idx].q_mu = new_q_mu
@@ -406,7 +346,16 @@ class ConditionalVariance():
             return Z.copy(), indices, deep_gp, elbos, dis
         return Z.copy(), indices, deep_gp, elbos
 
-def update_cholesky(L: np.ndarray, index):
+def update_cholesky(L: np.ndarray, index: int):
+    """Remove one row and column from lower triangular matrix
+
+    Args:
+        L (np.ndarray): Lower triangular matrix to update
+        index (int): Index of row and column to remove
+
+    Returns:
+        _type_: _description_
+    """
     if index == L.shape[1]-1:
         return np.delete(np.delete(L, index, axis=1), index, axis=2)
     L_33 = L[:, index+1:,index+1:]
